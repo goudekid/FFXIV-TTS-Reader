@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>netcoreapp3.0</TargetFramework>
+    <RootNamespace>FFXIV_TTS_Reader</RootNamespace>
+  </PropertyGroup>
+  <PropertyGroup>
+   <LangVersion>7.1</LangVersion>
+</PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\FFXIV TTS\FFXIV TTS\FFXIV TTS.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Extensions">
+      <HintPath>..\..\..\..\..\..\Program Files\dotnet\shared\Microsoft.WindowsDesktop.App\3.0.0-preview6-27804-01\System.Windows.Extensions.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
