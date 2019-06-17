@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Media;
 using System.ComponentModel;
+using System.Linq;
 
 namespace FFXIV_TTS_Reader
 {
@@ -15,7 +16,8 @@ namespace FFXIV_TTS_Reader
     {
         const int PROCESS_VM_READ = 0x0010;
         static BackgroundWorker backgroundWorker1 = new BackgroundWorker(); // Create the background worker
-        static string input;
+        static long pointerAddress;
+        static bool paused = false;
 
         [DllImport("kernel32.dll")]
         public static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
@@ -26,6 +28,8 @@ namespace FFXIV_TTS_Reader
         static async Task Main(string[] args)
         {
             string accessToken;
+
+            Console.WriteLine("THIS PROGRAM WILL BREAK ON GAME UPDATES, CURRENT DATE WHEN THIS WAS MADE IS 6/15/2019");
 
             // Add your subscription key here
             // If your resource isn't in WEST US, change the endpoint
@@ -49,57 +53,38 @@ namespace FFXIV_TTS_Reader
 
             backgroundWorker1.RunWorkerAsync(); // This starts the background worker
 
-
-
             string host = "https://westus2.tts.speech.microsoft.com/cognitiveservices/v1";
 
-            Process process = Process.GetProcessById(4880);
-            IntPtr processHandle = OpenProcess(PROCESS_VM_READ, false, process.Id);
-
-            int bytesRead = 0;
-            byte[] buffer = new byte[256]; 
-            string newText = "\0";
-            string oldText = "\0";
-            Console.WriteLine("Enter the address of Dialog Text");
-            string stringAddress = Console.ReadLine();
-            long address;
+            Process process = new Process();
             try
             {
-                address = Convert.ToInt64(stringAddress, 16);
+                process = Process.GetProcesses().First(p => p.ProcessName.Contains("ffxiv"));
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Bad Address: " + ex.Message);
-                return;
+                Console.WriteLine(ex.Message);
             }
 
-            long originalAddress = address;
-            bool pause = false;
+            Console.WriteLine("Found XIV process\n");
+
+            string newText = "\0";
+            string oldText = "\0";
+
+            long originalAddress = pointerAddress;
 
             while (true)
             {
-                if (input == "p" && !pause)
-                {
-                    pause = true;
-                    Console.WriteLine("Paused!");
-                    input = "";
-                }
-                else if (input == "p" && pause)
-                {
-                    pause = false;
-                    Console.WriteLine("Unpaused!");
-                    input = "";
-                }
+                byte[] dialogFlagMemory = ProcessMemoryReader.GetBytesAtAddress(process, process.MainModule.BaseAddress.ToInt64() + 0x01AB0BB0, 512, 0x348);
 
-                if (!pause)
+                if (!paused && dialogFlagMemory[0] == 1)
                 {
-                    address = originalAddress;
+                    // current as of 6/15/2019
 
-                    ReadProcessMemory((int)processHandle, address++, buffer, buffer.Length, ref bytesRead);
+                    byte[] dialogMemory = ProcessMemoryReader.GetBytesAtAddress(process, process.MainModule.BaseAddress.ToInt64() + 0x01A8DE18, 512, 0xA8, 0x1F0, 0x0);
 
                     List<byte> bufferList = new List<byte>();
 
-                    foreach (byte b in buffer)
+                    foreach (byte b in dialogMemory)
                     {
                         if (b == (byte)'\0')
                         {
@@ -111,9 +96,9 @@ namespace FFXIV_TTS_Reader
 
                     newText = Encoding.UTF8.GetString(bufferList.ToArray());
 
-                    for (int i = 0; i < buffer.Length; i++)
+                    for (int i = 0; i < dialogMemory.Length; i++)
                     {
-                        buffer[i] = (byte)'\0';
+                        dialogMemory[i] = (byte)'\0';
                     }
 
                     bufferList.Clear();
@@ -121,8 +106,9 @@ namespace FFXIV_TTS_Reader
                     if (oldText != newText)
                     {
                         oldText = newText;
-                        string sanitizedText = Regex.Replace(newText, @"[^\u0020-\u007F]+", string.Empty);
-                        Console.WriteLine(sanitizedText);
+                        string sanitizedText = Regex.Replace(newText.Replace("─", "+"), @"[^\u0020-\u007F]+", string.Empty);
+                        sanitizedText = sanitizedText.Replace("<", "*").Replace(">", "*").Replace("+", "...");
+                        Console.WriteLine(sanitizedText + "\n");
 
                         string body = @"<speak version='1.0' xmlns='https://www.w3.org/2001/10/synthesis' xml:lang='en-US'>
                                 <voice name='Microsoft Server Speech Text to Speech Voice (en-US, BenjaminRUS)'>
@@ -151,21 +137,47 @@ namespace FFXIV_TTS_Reader
                                 request.Headers.Add("X-Microsoft-OutputFormat", "riff-24khz-16bit-mono-pcm");
                                 // Create a request
 
-                                using (HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(true))
+                                HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(true);
+
+                                try
                                 {
                                     response.EnsureSuccessStatusCode();
-
-                                    // Asynchronously read the response
-                                    using (var dataStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(true))
-                                    {
-                                        using (var player = new SoundPlayer(dataStream))
-                                        {
-                                            player.Play();
-                                        }
-                                    }
-
-                                    response.Dispose();
                                 }
+                                catch(HttpRequestException httpEx)
+                                {
+                                    try
+                                    {
+                                        Console.WriteLine(httpEx.Message + ", attempting to refresh token");
+                                        accessToken = await auth.FetchTokenAsync().ConfigureAwait(false);
+                                        Console.WriteLine("Successfully refreshed access token. \n");
+
+                                        request.Headers.Remove("Authorization");
+                                        request.Headers.Add("Authorization", "Bearer " + accessToken);
+
+                                        response = await client.SendAsync(request).ConfigureAwait(true);
+
+                                        response.EnsureSuccessStatusCode();
+
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine("Failed to obtain an access token.");
+                                        Console.WriteLine(ex.ToString());
+                                        Console.WriteLine(ex.Message);
+                                        return;
+                                    }
+                                }
+
+                                // Asynchronously read the response
+                                using (var dataStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(true))
+                                {
+                                    using (var player = new SoundPlayer(dataStream))
+                                    {
+                                        player.Play();
+                                    }
+                                }
+
+                                response.Dispose();
                             }
                         }
                         System.Threading.Thread.Sleep(500);
@@ -183,7 +195,25 @@ namespace FFXIV_TTS_Reader
             }
             else
             {
-                input = Console.In.ReadLine().Replace("\n", string.Empty);
+                string newInput = Console.In.ReadLine().Replace("\n", string.Empty);
+                if (newInput.StartsWith("a="))
+                {
+                    pointerAddress = Convert.ToInt64(newInput.Replace("a=", string.Empty), 16);
+                }
+                else if (newInput == "p")
+                {
+                    if (newInput == "p" && !paused)
+                    {
+                        paused = true;
+                        Console.WriteLine("Paused!");
+                    }
+                    else if (newInput == "p" && paused)
+                    {
+                        paused = false;
+                        Console.WriteLine("Unpaused!");
+                    }
+                }
+
             }
         }
 
